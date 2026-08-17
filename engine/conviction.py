@@ -1,14 +1,26 @@
 """
-FNO COMMANDER - V2B Conviction Engine
+FNO COMMANDER - V3 Conviction Engine
 
-Combines the existing scanner output with additional confirmation
-factors without replacing the existing Dhan/data pipeline.
+The conviction engine combines:
+    Technical structure + MTF + market regime + futures OI.
 
-Score philosophy:
-- Positive confirmations add points.
-- Neutral conditions add little/no points.
-- Contradictory conditions reduce conviction.
-- Critical failures can trigger a veto.
+Option-chain confirmation remains on-demand in the UI so the scanner
+does not repeatedly consume Dhan option-chain requests.
+
+Score = 100 points:
+    EMA structure       15
+    VWAP                10
+    RSI                 10
+    SuperTrend          10
+    MACD                10
+    RVOL                15
+    MTF                 10
+    Market regime       10
+    Futures OI            5
+    Options               5 (reserved/on-demand)
+
+Important:
+This is a research/ranking model, not an execution signal.
 """
 
 from dataclasses import dataclass, field
@@ -46,25 +58,6 @@ def _factor(name, score, maximum, status, reason):
     )
 
 
-def _bool_factor(name, condition, maximum, positive_reason, negative_reason):
-    if condition:
-        return _factor(
-            name,
-            maximum,
-            maximum,
-            "PASS",
-            positive_reason,
-        )
-
-    return _factor(
-        name,
-        0,
-        maximum,
-        "FAIL",
-        negative_reason,
-    )
-
-
 def calculate_conviction(
     row: Dict,
     mtf_score: Optional[float] = None,
@@ -72,51 +65,26 @@ def calculate_conviction(
     oi_bias: Optional[str] = None,
     option_bias: Optional[str] = None,
 ):
-    """
-    Calculate an independent V2B conviction score.
-
-    The function is deliberately tolerant of missing fields because
-    Dhan responses can differ between instruments/data intervals.
-    """
-
     symbol = str(row.get("symbol", row.get("SYMBOL", "")))
+    direction = str(row.get("signal", row.get("SIGNAL", "WATCH"))).upper()
 
-    direction = str(
-        row.get(
-            "signal",
-            row.get("SIGNAL", "WATCH"),
-        )
-    ).upper()
+    def num(name, default=0.0):
+        value = row.get(name, row.get(name.upper(), default))
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return float(default)
 
-    price = float(row.get("price", row.get("PRICE", 0)) or 0)
-
-    ema20 = float(row.get("ema20", row.get("EMA20", 0)) or 0)
-    ema50 = float(row.get("ema50", row.get("EMA50", 0)) or 0)
-    ema200 = float(row.get("ema200", row.get("EMA200", 0)) or 0)
-
-    vwap = float(row.get("vwap", row.get("VWAP", 0)) or 0)
-    rsi = float(row.get("rsi", row.get("RSI", 50)) or 50)
-
-    rvol = float(
-        row.get(
-            "rvol",
-            row.get("RVOL", 0),
-        ) or 0
-    )
-
-    supertrend = str(
-        row.get(
-            "supertrend",
-            row.get("SUPERTREND", ""),
-        )
-    ).upper()
-
-    macd = str(
-        row.get(
-            "macd",
-            row.get("MACD", ""),
-        )
-    ).upper()
+    price = num("price")
+    ema20 = num("ema20")
+    ema50 = num("ema50")
+    ema200 = num("ema200")
+    vwap = num("vwap")
+    rsi = num("rsi", 50)
+    rvol = num("rvol")
+    supertrend = row.get("supertrend", row.get("SUPERTREND", 0))
+    macd = num("macd")
+    macd_signal = num("macd_signal")
 
     factors = []
     positives = []
@@ -126,314 +94,172 @@ def calculate_conviction(
     is_buy = direction == "BUY"
     is_sell = direction == "SELL"
 
-    # ---------------------------------------------------------
-    # 1. EMA structure - 15 points
-    # ---------------------------------------------------------
-
-    if is_buy:
-        ema_ok = price > ema20 and ema20 > ema50 and ema50 > ema200
-        ema_reason = "Price > EMA20 > EMA50 > EMA200"
-    elif is_sell:
-        ema_ok = price < ema20 and ema20 < ema50 and ema50 < ema200
-        ema_reason = "Price < EMA20 < EMA50 < EMA200"
-    else:
-        ema_ok = False
-        ema_reason = "No directional signal"
-
-    f = _bool_factor(
-        "EMA Structure",
-        ema_ok,
-        15,
-        ema_reason,
-        "EMA structure is not aligned with signal",
+    # 1. EMA structure — 15
+    ema_ok = (
+        (is_buy and price > ema20 > ema50 > ema200)
+        or (is_sell and price < ema20 < ema50 < ema200)
     )
+    factors.append(_factor(
+        "EMA Structure", 15 if ema_ok else 0, 15,
+        "PASS" if ema_ok else "FAIL",
+        "Price/EMA stack aligned with direction"
+        if ema_ok else "EMA stack is not fully aligned",
+    ))
 
-    factors.append(f)
-
-    # ---------------------------------------------------------
-    # 2. VWAP - 10 points
-    # ---------------------------------------------------------
-
-    if is_buy:
-        vwap_ok = price > vwap
-    elif is_sell:
-        vwap_ok = price < vwap
-    else:
-        vwap_ok = False
-
-    f = _bool_factor(
-        "VWAP",
-        vwap_ok,
-        10,
-        "Price is on the correct side of VWAP",
-        "Price is on the wrong side of VWAP",
+    # 2. VWAP — 10
+    vwap_ok = (
+        (is_buy and price > vwap)
+        or (is_sell and price < vwap)
     )
+    factors.append(_factor(
+        "VWAP", 10 if vwap_ok else 0, 10,
+        "PASS" if vwap_ok else "FAIL",
+        "Price is on the correct side of VWAP"
+        if vwap_ok else "Price is on the wrong side of VWAP",
+    ))
 
-    factors.append(f)
-
-    # ---------------------------------------------------------
-    # 3. RSI - 10 points
-    # ---------------------------------------------------------
-
-    if is_buy:
-        rsi_ok = 50 <= rsi <= 75
-    elif is_sell:
-        rsi_ok = 25 <= rsi < 50
-    else:
-        rsi_ok = False
-
-    f = _bool_factor(
-        "RSI",
-        rsi_ok,
-        10,
-        f"RSI supports {direction} ({rsi:.1f})",
-        f"RSI does not adequately confirm {direction} ({rsi:.1f})",
+    # 3. RSI — 10
+    rsi_ok = (
+        (is_buy and 50 <= rsi <= 75)
+        or (is_sell and 25 <= rsi < 50)
     )
+    factors.append(_factor(
+        "RSI", 10 if rsi_ok else 0, 10,
+        "PASS" if rsi_ok else "FAIL",
+        f"RSI supports {direction} ({rsi:.1f})"
+        if rsi_ok else f"RSI does not confirm {direction} ({rsi:.1f})",
+    ))
 
-    factors.append(f)
+    # 4. SuperTrend — 10
+    try:
+        st_bull = float(supertrend) == 1
+    except (TypeError, ValueError):
+        st_text = str(supertrend).upper()
+        st_bull = "BULL" in st_text or "UP" in st_text
 
-    # ---------------------------------------------------------
-    # 4. SuperTrend - 10 points
-    # ---------------------------------------------------------
+    st_ok = st_bull if is_buy else (not st_bull if is_sell else False)
+    factors.append(_factor(
+        "SuperTrend", 10 if st_ok else 0, 10,
+        "PASS" if st_ok else "FAIL",
+        f"SuperTrend confirms {direction}"
+        if st_ok else "SuperTrend does not confirm direction",
+    ))
 
-    st_buy = "BULL" in supertrend or "UP" in supertrend
-    st_sell = "BEAR" in supertrend or "DOWN" in supertrend
+    # 5. MACD — 10
+    macd_bull = macd > macd_signal
+    macd_ok = macd_bull if is_buy else (not macd_bull if is_sell else False)
+    factors.append(_factor(
+        "MACD", 10 if macd_ok else 0, 10,
+        "PASS" if macd_ok else "FAIL",
+        f"MACD confirms {direction}"
+        if macd_ok else "MACD does not confirm direction",
+    ))
 
-    st_ok = (
-        (is_buy and st_buy)
-        or
-        (is_sell and st_sell)
-    )
-
-    f = _bool_factor(
-        "SuperTrend",
-        st_ok,
-        10,
-        f"SuperTrend confirms {direction}",
-        "SuperTrend does not confirm direction",
-    )
-
-    factors.append(f)
-
-    # ---------------------------------------------------------
-    # 5. MACD - 10 points
-    # ---------------------------------------------------------
-
-    macd_buy = "BULL" in macd or "POS" in macd or "UP" in macd
-    macd_sell = "BEAR" in macd or "NEG" in macd or "DOWN" in macd
-
-    macd_ok = (
-        (is_buy and macd_buy)
-        or
-        (is_sell and macd_sell)
-    )
-
-    f = _bool_factor(
-        "MACD",
-        macd_ok,
-        10,
-        f"MACD confirms {direction}",
-        "MACD does not confirm direction",
-    )
-
-    factors.append(f)
-
-    # ---------------------------------------------------------
-    # 6. Volume / RVOL - 15 points
-    # ---------------------------------------------------------
-
+    # 6. RVOL — 15
     if rvol >= 2.0:
-        volume_score = 15
-        volume_status = "PASS"
-        volume_reason = f"Strong volume confirmation ({rvol:.2f}x)"
+        volume_points, volume_status = 15, "PASS"
+        volume_reason = f"Strong participation ({rvol:.2f}x RVOL)"
     elif rvol >= 1.2:
-        volume_score = 10
-        volume_status = "PASS"
-        volume_reason = f"Acceptable volume confirmation ({rvol:.2f}x)"
+        volume_points, volume_status = 10, "PASS"
+        volume_reason = f"Acceptable participation ({rvol:.2f}x RVOL)"
     elif rvol >= 0.8:
-        volume_score = 5
-        volume_status = "WEAK"
-        volume_reason = f"Below ideal volume ({rvol:.2f}x)"
+        volume_points, volume_status = 5, "WEAK"
+        volume_reason = f"Weak participation ({rvol:.2f}x RVOL)"
         warnings.append("Volume confirmation is weak")
     else:
-        volume_score = 0
-        volume_status = "FAIL"
-        volume_reason = f"Very weak relative volume ({rvol:.2f}x)"
+        volume_points, volume_status = 0, "FAIL"
+        volume_reason = f"Very weak participation ({rvol:.2f}x RVOL)"
         warnings.append("Very weak volume confirmation")
+    factors.append(_factor(
+        "Volume / RVOL", volume_points, 15,
+        volume_status, volume_reason,
+    ))
 
-    factors.append(
-        _factor(
-            "Volume / RVOL",
-            volume_score,
-            15,
-            volume_status,
-            volume_reason,
-        )
-    )
-
-    # ---------------------------------------------------------
-    # 7. MTF - 10 points
-    # ---------------------------------------------------------
-
-    if mtf_score is None:
-        mtf_score = 0
-
-    mtf_score = max(0, min(100, float(mtf_score)))
-
-    mtf_points = round((mtf_score / 100) * 10, 2)
-
-    if mtf_score >= 80:
-        mtf_status = "PASS"
-        mtf_reason = f"Strong MTF alignment ({mtf_score:.0f}/100)"
-    elif mtf_score >= 60:
-        mtf_status = "WEAK"
-        mtf_reason = f"Moderate MTF alignment ({mtf_score:.0f}/100)"
-        warnings.append("MTF confirmation is not strong")
-    else:
-        mtf_status = "FAIL"
-        mtf_reason = f"Weak MTF alignment ({mtf_score:.0f}/100)"
+    # 7. MTF — 10
+    mtf = max(0.0, min(100.0, float(mtf_score or 0)))
+    mtf_points = round(mtf * 0.10, 2)
+    mtf_status = "PASS" if mtf >= 80 else "WEAK" if mtf >= 60 else "FAIL"
+    if mtf < 60:
         warnings.append("MTF confirmation is weak")
+    factors.append(_factor(
+        "Multi-Timeframe", mtf_points, 10, mtf_status,
+        f"MTF alignment {mtf:.0f}/100",
+    ))
 
-    factors.append(
-        _factor(
-            "Multi-Timeframe",
-            mtf_points,
-            10,
-            mtf_status,
-            mtf_reason,
-        )
-    )
+    # 8. Market regime — 10
+    bias = str(market_bias or "").upper()
+    bull_regimes = {"BULLISH", "MILD BULL", "POSITIVE", "BUY"}
+    bear_regimes = {"BEARISH", "MILD BEAR", "NEGATIVE", "SELL"}
 
-    # ---------------------------------------------------------
-    # 8. Market regime - 10 points
-    # ---------------------------------------------------------
-
-    market_bias = str(market_bias or "").upper()
-
-    market_aligned = (
-        (is_buy and market_bias in ("BULLISH", "POSITIVE", "BUY"))
-        or
-        (is_sell and market_bias in ("BEARISH", "NEGATIVE", "SELL"))
-    )
-
-    market_neutral = market_bias in ("", "NEUTRAL", "SIDEWAYS")
-
-    if market_aligned:
-        market_points = 10
-        market_status = "PASS"
-        market_reason = f"Market regime supports {direction}"
-    elif market_neutral:
-        market_points = 5
-        market_status = "NEUTRAL"
-        market_reason = "Market regime is neutral"
+    if (is_buy and bias in bull_regimes) or (is_sell and bias in bear_regimes):
+        regime_points, regime_status = 10, "PASS"
+        regime_reason = f"Market regime supports {direction}"
+        regime_aligned = True
+    elif bias in {"", "UNKNOWN", "RANGE", "NEUTRAL", "SIDEWAYS"}:
+        regime_points, regime_status = 5, "NEUTRAL"
+        regime_reason = "Market regime is neutral/ranging"
+        regime_aligned = True
     else:
-        market_points = 0
-        market_status = "FAIL"
-        market_reason = f"Market regime conflicts with {direction}"
+        regime_points, regime_status = 0, "FAIL"
+        regime_reason = f"Market regime conflicts with {direction}"
+        regime_aligned = False
         warnings.append("Market regime is against the trade")
 
-    factors.append(
-        _factor(
-            "Market Regime",
-            market_points,
-            10,
-            market_status,
-            market_reason,
-        )
+    factors.append(_factor(
+        "Market Regime", regime_points, 10,
+        regime_status, regime_reason,
+    ))
+
+    # 9. Futures OI — 5
+    oi = str(oi_bias or "").upper().replace("_", " ")
+    oi_ok = (
+        (is_buy and oi in {"LONG BUILDUP", "SHORT COVERING"})
+        or (is_sell and oi in {"SHORT BUILDUP", "LONG UNWINDING"})
     )
+    factors.append(_factor(
+        "Futures OI", 5 if oi_ok else 0, 5,
+        "PASS" if oi_ok else "NEUTRAL",
+        f"Futures OI supports {direction}" if oi_ok
+        else "No aligned futures OI confirmation",
+    ))
 
-    # ---------------------------------------------------------
-    # 9. Futures OI - 5 points
-    # ---------------------------------------------------------
-
-    oi_bias = str(oi_bias or "").upper()
-
-    oi_aligned = (
-        (is_buy and oi_bias in ("LONG BUILDUP", "LONG_BUILDUP", "SHORT COVERING"))
-        or
-        (is_sell and oi_bias in ("SHORT BUILDUP", "SHORT_BUILDUP", "LONG UNWINDING"))
+    # 10. Options — 5 reserved for on-demand confirmation
+    opt = str(option_bias or "").upper()
+    option_ok = (
+        (is_buy and opt in {"CE", "CALL", "BULLISH", "BUY"})
+        or (is_sell and opt in {"PE", "PUT", "BEARISH", "SELL"})
     )
-
-    if oi_aligned:
-        oi_points = 5
-        oi_status = "PASS"
-        oi_reason = f"Futures OI supports {direction}"
-    else:
-        oi_points = 0
-        oi_status = "NEUTRAL"
-        oi_reason = "No usable OI confirmation"
-
-    factors.append(
-        _factor(
-            "Futures OI",
-            oi_points,
-            5,
-            oi_status,
-            oi_reason,
-        )
-    )
-
-    # ---------------------------------------------------------
-    # 10. Option structure - 5 points
-    # ---------------------------------------------------------
-
-    option_bias = str(option_bias or "").upper()
-
-    option_aligned = (
-        (is_buy and option_bias in ("CE", "CALL", "BULLISH", "BUY"))
-        or
-        (is_sell and option_bias in ("PE", "PUT", "BEARISH", "SELL"))
-    )
-
-    if option_aligned:
-        option_points = 5
-        option_status = "PASS"
-        option_reason = f"Option structure supports {direction}"
-    else:
-        option_points = 0
-        option_status = "NEUTRAL"
-        option_reason = "No usable option confirmation"
-
-    factors.append(
-        _factor(
-            "Options",
-            option_points,
-            5,
-            option_status,
-            option_reason,
-        )
-    )
-
-    # ---------------------------------------------------------
-    # Aggregate
-    # ---------------------------------------------------------
+    factors.append(_factor(
+        "Options", 5 if option_ok else 0, 5,
+        "PASS" if option_ok else "ON-DEMAND",
+        f"Option structure supports {direction}" if option_ok
+        else "Option confirmation loaded on demand",
+    ))
 
     raw_score = sum(f.score for f in factors)
 
-    # Critical veto:
-    # Do not allow a very weak volume situation to remain a
-    # high-conviction trade.
+    # Hard vetoes: these stop a setup from being labelled high conviction.
+    if direction not in {"BUY", "SELL"}:
+        vetoes.append("No directional signal")
+
     if rvol < 0.5:
-        vetoes.append("RVOL below 0.5x - insufficient participation")
+        vetoes.append(f"RVOL {rvol:.2f}x is below 0.5x")
 
-    # Critical trend veto
-    if is_buy and ema20 and ema50 and ema200:
-        if not (price > ema20 and ema20 > ema50):
-            vetoes.append("Bullish EMA structure is not confirmed")
+    if is_buy and not (price > ema20 > ema50):
+        vetoes.append("BUY EMA structure is not confirmed")
 
-    if is_sell and ema20 and ema50 and ema200:
-        if not (price < ema20 and ema20 < ema50):
-            vetoes.append("Bearish EMA structure is not confirmed")
+    if is_sell and not (price < ema20 < ema50):
+        vetoes.append("SELL EMA structure is not confirmed")
 
-    # Market conflict is not a hard veto, but it limits conviction.
-    if market_bias and not market_aligned and not market_neutral:
+    # Conflicting market regime caps, but does not completely veto.
+    if not regime_aligned:
         raw_score = min(raw_score, 69)
 
-    # Volume failure caps conviction.
+    # Poor participation cannot become an A-grade trade.
     if rvol < 0.8:
         raw_score = min(raw_score, 69)
 
-    final_score = round(max(0, min(100, raw_score)))
+    final_score = int(round(max(0, min(100, raw_score))))
 
     if vetoes:
         status = "VETO"
