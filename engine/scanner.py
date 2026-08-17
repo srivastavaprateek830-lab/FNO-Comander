@@ -210,7 +210,7 @@ def scan_universe(_client, universe, stage2_count=25, min_score=75, market_bias=
 
     results = []
 
-    with ThreadPoolExecutor(max_workers=4) as pool:
+    with ThreadPoolExecutor(max_workers=2) as pool:
         futures = [
             pool.submit(_scan_one, _client, row, market_bias)
             for _, row in candidates.iterrows()
@@ -231,10 +231,10 @@ def scan_universe(_client, universe, stage2_count=25, min_score=75, market_bias=
     ).reset_index(drop=True)
 
     # Only top 10 get expensive 60M + futures-OI enrichment.
-    enrich_count = min(10, len(out))
+    enrich_count = min(6, len(out))
     enriched = []
 
-    with ThreadPoolExecutor(max_workers=4) as pool:
+    with ThreadPoolExecutor(max_workers=2) as pool:
         futures = [
             pool.submit(
                 _enrich_one,
