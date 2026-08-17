@@ -213,21 +213,34 @@ except Exception as exc:
 
 
 # -----------------------------------------------------------------------------
-# Run scanner once per cache window
+# Market context + scanner
 # -----------------------------------------------------------------------------
+try:
+    market_df = cached_market_snapshot(client, instruments)
+except Exception:
+    market_df = pd.DataFrame()
+
+regime = market_regime(market_df)
+
 @st.cache_data(ttl=45, show_spinner=False)
-def run_scanner(_client, universe, stage2_count, minimum_score):
+def run_scanner(_client, universe, stage2_count, minimum_score, market_bias):
     return scan_universe(
         _client=_client,
         universe=universe,
         stage2_count=stage2_count,
         min_score=minimum_score,
+        market_bias=market_bias,
     )
-
 
 try:
     with st.spinner("Refreshing F&O intelligence…"):
-        results = run_scanner(client, universe, candidate_count, min_score)
+        results = run_scanner(
+            client,
+            universe,
+            candidate_count,
+            min_score,
+            regime["label"],
+        )
 except DhanAPIError as exc:
     st.error(str(exc))
     results = pd.DataFrame()
@@ -242,13 +255,6 @@ except Exception as exc:
 if page == "Dashboard":
     st.markdown('<div class="hero-title">📈 FNO COMMANDER</div>', unsafe_allow_html=True)
     st.markdown('<div class="hero-sub">Integrated Indian F&O research & high-conviction alert terminal</div>', unsafe_allow_html=True)
-
-    try:
-        market_df = cached_market_snapshot(client, instruments)
-    except Exception:
-        market_df = pd.DataFrame()
-
-    regime = market_regime(market_df)
 
     # Market strip
     section_title("MARKET REGIME", "Index direction is used as a market-level context filter.")
@@ -286,10 +292,13 @@ if page == "Dashboard":
     st.divider()
 
     # Radar
-    section_title("🔥 HIGH-CONVICTION TRADE RADAR", "The same Stage-2 scanner feeds this dashboard; no separate scanner visit is required.")
+    section_title(
+        "🔥 HIGH-CONVICTION TRADE RADAR",
+        "Stage-2 technical scan + 60M trend + futures OI enrichment. Option chain is loaded only when requested.",
+    )
     high = results[results["score"] >= min_score].copy() if not results.empty else pd.DataFrame()
     radar = high.head(10) if not high.empty else results.head(10)
-    render_signal_table(radar)
+    render_signal_table(radar, full=True)
 
     if radar.empty:
         st.warning("No current candidates. Lower the minimum conviction or force refresh.")
@@ -322,9 +331,12 @@ if page == "Dashboard":
 
     with left:
         signal_badge(selected["signal"], selected["score"])
+        st.caption(selected.get("status", "TECHNICAL ONLY"))
         st.metric("Last price", f"₹{last['close']:,.2f}")
         st.metric("RVOL", f"{last['rvol']:.2f}x")
         st.metric("RSI", f"{last['rsi']:.1f}")
+        if "mtf_score" in selected:
+            st.metric("60M confirmation", f"{float(selected['mtf_score']):.0f}/100")
 
     with mid:
         st.markdown("### Technical confirmation")
