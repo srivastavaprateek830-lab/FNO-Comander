@@ -161,16 +161,47 @@ def add_indicators(df):
     out["atr"] = atr(out, 14)
     out["vwap"] = vwap(out)
 
-    out["volume_ma20"] = (
-        out["volume"]
-        .rolling(20, min_periods=10)
-        .mean()
-    )
+    # ------------------------------------------------------------------
+    # Relative Volume (RVOL)
+    # ------------------------------------------------------------------
+    # For intraday candles, comparing a 15-minute bar with the previous
+    # 20 arbitrary candles is misleading because different time-of-day
+    # bars naturally have different volumes.  Compare each bar with the
+    # same time-slot on prior sessions instead.
+    if "timestamp" in out.columns and pd.api.types.is_datetime64_any_dtype(
+        out["timestamp"]
+    ):
+        out["_session"] = out["timestamp"].dt.date
+        out["_slot"] = out["timestamp"].dt.strftime("%H:%M")
 
-    out["rvol"] = (
-        out["volume"]
-        / out["volume_ma20"].replace(0, np.nan)
-    )
+        same_slot_avg = (
+            out.groupby("_slot")["volume"]
+            .transform(
+                lambda s: s.shift(1).rolling(20, min_periods=5).mean()
+            )
+        )
+
+        # Warm-up fallback: rolling average of the preceding 20 bars.
+        fallback_avg = out["volume"].shift(1).rolling(
+            20, min_periods=10
+        ).mean()
+
+        reference_volume = same_slot_avg.fillna(fallback_avg)
+
+        out["rvol"] = (
+            out["volume"]
+            / reference_volume.replace(0, np.nan)
+        )
+
+        out.drop(columns=["_session", "_slot"], inplace=True, errors="ignore")
+    else:
+        reference_volume = out["volume"].shift(1).rolling(
+            20, min_periods=10
+        ).mean()
+        out["rvol"] = (
+            out["volume"]
+            / reference_volume.replace(0, np.nan)
+        )
 
     out["supertrend"] = supertrend_direction(out)
 
