@@ -61,7 +61,7 @@ with st.sidebar:
     st.subheader("Scanner Controls")
     min_score = st.slider("Minimum conviction", 50, 95, 75, 1)
     candidate_count = st.slider("Stage-2 candidates", 10, 50, 25, 5)
-    refresh_seconds = st.slider("Auto refresh (sec)", 0, 300, 60, 30)
+    refresh_seconds = st.slider("Auto refresh (sec)", 0, 300, 90, 30)
 
     if st.button("🔄 FORCE REFRESH", use_container_width=True):
         st.cache_data.clear()
@@ -118,7 +118,7 @@ def cached_market_snapshot(_client, instruments):
     return pd.DataFrame(rows)
 
 
-@st.cache_data(ttl=90, show_spinner=False)
+@st.cache_data(ttl=120, show_spinner=False)
 def cached_stock_data(_client, security_id, interval="15", days=60):
     return _client.intraday(
         security_id=int(security_id),
@@ -130,7 +130,7 @@ def cached_stock_data(_client, security_id, interval="15", days=60):
     )
 
 
-@st.cache_data(ttl=90, show_spinner=False)
+@st.cache_data(ttl=120, show_spinner=False)
 def cached_futures_data(_client, future_security_id):
     if pd.isna(future_security_id):
         return pd.DataFrame()
@@ -420,7 +420,8 @@ if page == "Dashboard":
         signal_badge(selected["signal"], selected["score"])
         st.caption(selected.get("status", "TECHNICAL ONLY"))
         st.metric("Last price", f"₹{last['close']:,.2f}")
-        st.metric("RVOL", f"{last['rvol']:.2f}x")
+        rvol_value = float(last["rvol"]) if pd.notna(last["rvol"]) else None
+        st.metric("RVOL", f"{rvol_value:.2f}x" if rvol_value is not None else "—")
         st.metric("RSI", f"{last['rsi']:.1f}")
         if "mtf_score" in selected:
             st.metric("60M confirmation", f"{float(selected['mtf_score']):.0f}/100")
