@@ -1,4 +1,29 @@
+"""
+FNO COMMANDER - Technical Stage-2 Scoring
+
+This is the fast 15-minute score used before the slower MTF/OI
+enrichment. It is intentionally deterministic and directional.
+"""
+
+import math
+
+
+def _valid(value):
+    try:
+        return value is not None and not math.isnan(float(value))
+    except (TypeError, ValueError):
+        return False
+
+
 def score_technical(df):
+    if df is None or df.empty:
+        return {
+            "score": 50,
+            "signal": "WATCH",
+            "reasons": ["No technical data"],
+            "risks": ["No technical data"],
+        }
+
     last = df.iloc[-1]
 
     bull = 0
@@ -6,72 +31,94 @@ def score_technical(df):
     reasons = []
     risks = []
 
-    if last["close"] > last["ema20"]:
-        bull += 10
-        reasons.append("Price above EMA20")
+    def add_direction(condition, weight, bull_reason, bear_reason):
+        nonlocal bull, bear
+        if condition is True:
+            bull += weight
+            reasons.append(bull_reason)
+        elif condition is False:
+            bear += weight
+            risks.append(bear_reason)
+
+    # EMA structure — 30
+    if all(_valid(last.get(c)) for c in ["close", "ema20", "ema50", "ema200"]):
+        add_direction(
+            last["close"] > last["ema20"] > last["ema50"] > last["ema200"],
+            30,
+            "Price > EMA20 > EMA50 > EMA200",
+            "Bearish EMA stack",
+        )
     else:
-        bear += 10
-        risks.append("Price below EMA20")
+        risks.append("EMA data incomplete")
 
-    if last["ema20"] > last["ema50"]:
-        bull += 10
-        reasons.append("EMA20 > EMA50")
-    else:
-        bear += 10
-        risks.append("EMA20 below EMA50")
+    # VWAP — 15
+    if _valid(last.get("close")) and _valid(last.get("vwap")):
+        add_direction(
+            last["close"] > last["vwap"],
+            15,
+            "Price above session VWAP",
+            "Price below session VWAP",
+        )
 
-    if last["ema50"] > last["ema200"]:
-        bull += 8
-        reasons.append("EMA50 > EMA200")
-    else:
-        bear += 8
-        risks.append("EMA50 below EMA200")
+    # RSI — 10
+    if _valid(last.get("rsi")):
+        rsi = float(last["rsi"])
+        if rsi >= 55:
+            bull += 10
+            reasons.append(f"RSI bullish ({rsi:.1f})")
+        elif rsi <= 45:
+            bear += 10
+            risks.append(f"RSI bearish ({rsi:.1f})")
+        else:
+            risks.append(f"RSI neutral ({rsi:.1f})")
 
-    if last["close"] > last["vwap"]:
-        bull += 8
-        reasons.append("Price above VWAP")
-    else:
-        bear += 8
-        risks.append("Price below VWAP")
+    # RVOL — 15
+    if _valid(last.get("rvol")):
+        rvol = float(last["rvol"])
+        if rvol >= 2.0:
+            bull += 15
+            bear += 15
+            reasons.append(f"Strong volume expansion ({rvol:.2f}x)")
+        elif rvol >= 1.2:
+            bull += 10
+            bear += 10
+            reasons.append(f"Good participation ({rvol:.2f}x)")
+        elif rvol >= 0.8:
+            bull += 5
+            bear += 5
+            risks.append(f"Volume below ideal ({rvol:.2f}x)")
+        else:
+            risks.append(f"Weak RVOL ({rvol:.2f}x)")
 
-    if last["rsi"] >= 55:
-        bull += 6
-        reasons.append(f"RSI bullish ({last['rsi']:.1f})")
-    elif last["rsi"] <= 45:
-        bear += 6
-        risks.append(f"RSI bearish ({last['rsi']:.1f})")
+    # SuperTrend — 10
+    if _valid(last.get("supertrend")):
+        if int(last["supertrend"]) == 1:
+            bull += 10
+            reasons.append("SuperTrend bullish")
+        else:
+            bear += 10
+            risks.append("SuperTrend bearish")
 
-    if last["rvol"] >= 2:
-        bull += 8
-        bear += 8
-        reasons.append(f"Strong volume expansion ({last['rvol']:.2f}x)")
-    elif last["rvol"] >= 1.5:
-        bull += 5
-        bear += 5
-        reasons.append(f"Volume expansion ({last['rvol']:.2f}x)")
-    else:
-        risks.append("Volume confirmation is weak")
+    # MACD — 10
+    if _valid(last.get("macd")) and _valid(last.get("macd_signal")):
+        if last["macd"] > last["macd_signal"]:
+            bull += 10
+            reasons.append("MACD bullish")
+        else:
+            bear += 10
+            risks.append("MACD bearish")
 
-    if last["supertrend"] == 1:
-        bull += 5
-        reasons.append("SuperTrend bullish")
-    else:
-        bear += 5
-        risks.append("SuperTrend bearish")
+    total = bull + bear
 
-    if last["macd"] > last["macd_signal"]:
-        bull += 5
-        reasons.append("MACD bullish")
-    else:
-        bear += 5
-        risks.append("MACD bearish")
+    if total == 0:
+        return {
+            "score": 50,
+            "signal": "WATCH",
+            "reasons": reasons,
+            "risks": risks,
+        }
 
-    total_directional = bull + bear
-    if total_directional == 0:
-        return {"score": 50, "signal": "WAIT", "reasons": reasons, "risks": risks}
-
-    # Directional score normalized to 0-100.
-    score = round(100 * bull / total_directional)
+    score = round(100 * bull / total)
 
     if score >= 75:
         signal = "BUY"
