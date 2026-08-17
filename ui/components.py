@@ -59,16 +59,17 @@ def render_signal_table(view, full=False):
         st.info("No qualifying setups.")
         return
 
-    cols = [
-        c for c in [
-            "symbol", "signal", "score", "price", "rvol", "rsi", "atr", "priority"
-        ] if c in view.columns
+    preferred = [
+        "symbol", "signal", "score", "status", "price",
+        "rvol", "rsi", "atr", "mtf_score", "oi_status", "priority"
     ]
+    cols = [c for c in preferred if c in view.columns]
     display = view[cols].copy()
     rename = {
         "symbol": "SYMBOL", "signal": "SIGNAL", "score": "SCORE",
-        "price": "PRICE", "rvol": "RVOL", "rsi": "RSI",
-        "atr": "ATR", "priority": "PRIORITY",
+        "status": "MODEL STATUS", "price": "PRICE", "rvol": "RVOL",
+        "rsi": "RSI", "atr": "ATR", "mtf_score": "60M",
+        "oi_status": "FUT OI", "priority": "PRIORITY",
     }
     display = display.rename(columns=rename)
     if "PRICE" in display:
@@ -79,6 +80,8 @@ def render_signal_table(view, full=False):
         display["RSI"] = display["RSI"].map(lambda x: f"{x:.1f}")
     if "ATR" in display:
         display["ATR"] = display["ATR"].map(lambda x: f"{x:.2f}")
+    if "60M" in display:
+        display["60M"] = display["60M"].map(lambda x: f"{float(x):.0f}")
 
     st.dataframe(display, use_container_width=True, hide_index=True)
 
