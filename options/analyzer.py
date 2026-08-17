@@ -1,87 +1,127 @@
 import pandas as pd
 
 
+def _num(value, default=0.0):
+    try:
+        if value is None:
+            return float(default)
+        return float(value)
+    except (TypeError, ValueError):
+        return float(default)
+
+
 def _oi_change_pct(current, previous):
-    if previous in (None, 0):
+    previous = _num(previous)
+    current = _num(current)
+    if previous == 0:
         return 0.0
     return (current - previous) / previous * 100.0
 
 
 def analyze_option_chain(raw):
-    data = raw.get("data", {})
-    spot = float(data.get("last_price", 0))
-    oc = data.get("oc", {})
+    """
+    Normalize Dhan option-chain response into:
+      - ATM-window table
+      - PCR
+      - maximum-OI call/put walls
+      - simple directional option bias
 
-    rows = []
+    CE and PE legs are deliberately collected independently.
+    """
+
+    data = raw.get("data", {}) if isinstance(raw, dict) else {}
+    spot = _num(data.get("last_price"))
+    oc = data.get("oc", {}) or {}
+
+    rows_by_strike = {}
     calls = []
     puts = []
 
     for strike_text, legs in oc.items():
-        strike = float(strike_text)
+        try:
+            strike = float(strike_text)
+        except (TypeError, ValueError):
+            continue
 
+        legs = legs or {}
         ce = legs.get("ce")
         pe = legs.get("pe")
 
-        if ce:
-            calls.append(ce)
-            rows.append({
+        row = rows_by_strike.setdefault(
+            strike,
+            {
                 "Strike": strike,
-                "CE LTP": ce.get("last_price"),
-                "CE OI": ce.get("oi"),
-                "CE ΔOI %": _oi_change_pct(ce.get("oi", 0), ce.get("previous_oi", 0)),
-                "CE IV": ce.get("implied_volatility"),
-                "CE Δ": ce.get("greeks", {}).get("delta"),
+                "CE LTP": None,
+                "CE OI": None,
+                "CE ΔOI %": None,
+                "CE IV": None,
+                "CE Δ": None,
                 "PE LTP": None,
                 "PE OI": None,
                 "PE ΔOI %": None,
                 "PE IV": None,
                 "PE Δ": None,
+            },
+        )
+
+        if ce:
+            calls.append(ce)
+            row.update({
+                "CE LTP": ce.get("last_price"),
+                "CE OI": ce.get("oi"),
+                "CE ΔOI %": _oi_change_pct(
+                    ce.get("oi"), ce.get("previous_oi")
+                ),
+                "CE IV": ce.get("implied_volatility"),
+                "CE Δ": (ce.get("greeks") or {}).get("delta"),
             })
 
         if pe:
-            existing = next((x for x in rows if x["Strike"] == strike), None)
-            if existing:
-                existing.update({
-                    "PE LTP": pe.get("last_price"),
-                    "PE OI": pe.get("oi"),
-                    "PE ΔOI %": _oi_change_pct(pe.get("oi", 0), pe.get("previous_oi", 0)),
-                    "PE IV": pe.get("implied_volatility"),
-                    "PE Δ": pe.get("greeks", {}).get("delta"),
-                })
-            else:
-                rows.append({
-                    "Strike": strike,
-                    "CE LTP": None,
-                    "CE OI": None,
-                    "CE ΔOI %": None,
-                    "CE IV": None,
-                    "CE Δ": None,
-                    "PE LTP": pe.get("last_price"),
-                    "PE OI": pe.get("oi"),
-                    "PE ΔOI %": _oi_change_pct(pe.get("oi", 0), pe.get("previous_oi", 0)),
-                    "PE IV": pe.get("implied_volatility"),
-                    "PE Δ": pe.get("greeks", {}).get("delta"),
-                })
+            puts.append(pe)  # FIX: PE was previously not collected.
+            row.update({
+                "PE LTP": pe.get("last_price"),
+                "PE OI": pe.get("oi"),
+                "PE ΔOI %": _oi_change_pct(
+                    pe.get("oi"), pe.get("previous_oi")
+                ),
+                "PE IV": pe.get("implied_volatility"),
+                "PE Δ": (pe.get("greeks") or {}).get("delta"),
+            })
 
-    total_call_oi = sum((x.get("oi") or 0) for x in calls)
-    total_put_oi = sum((x.get("oi") or 0) for x in puts)
+    total_call_oi = sum(_num(x.get("oi")) for x in calls)
+    total_put_oi = sum(_num(x.get("oi")) for x in puts)
 
     pcr = total_put_oi / total_call_oi if total_call_oi else 0.0
 
-    call_wall = max(calls, key=lambda x: x.get("oi", 0)) if calls else {}
-    put_wall = max(puts, key=lambda x: x.get("oi", 0)) if puts else {}
+    call_wall = max(calls, key=lambda x: _num(x.get("oi"))) if calls else {}
+    put_wall = max(puts, key=lambda x: _num(x.get("oi"))) if puts else {}
 
-    table = pd.DataFrame(rows).sort_values("Strike")
+    if pcr >= 1.20:
+        bias = "BULLISH"
+    elif pcr <= 0.80:
+        bias = "BEARISH"
+    else:
+        bias = "NEUTRAL"
+
+    table = pd.DataFrame(list(rows_by_strike.values()))
+
     if not table.empty:
-        # Show a practical ATM window rather than every strike.
         table["distance"] = (table["Strike"] - spot).abs()
-        table = table.sort_values("distance").head(15).sort_values("Strike")
-        table = table.drop(columns=["distance"])
+        table = (
+            table.sort_values("distance")
+            .head(15)
+            .sort_values("Strike")
+            .drop(columns=["distance"])
+            .reset_index(drop=True)
+        )
 
     return {
         "spot": spot,
         "pcr": pcr,
-        "call_wall": call_wall.get("strike"),
-        "put_wall": put_wall.get("strike"),
+        "call_wall": _num(call_wall.get("strike"), 0) or None,
+        "put_wall": _num(put_wall.get("strike"), 0) or None,
+        "bias": bias,
+        "total_call_oi": total_call_oi,
+        "total_put_oi": total_put_oi,
         "table": table,
     }
