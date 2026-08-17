@@ -298,19 +298,106 @@ if page == "Dashboard":
     )
     high = results[results["score"] >= min_score].copy() if not results.empty else pd.DataFrame()
     radar = high.head(10) if not high.empty else results.head(10)
-    render_signal_table(radar, full=True)
 
     if radar.empty:
         st.warning("No current candidates. Lower the minimum conviction or force refresh.")
         st.stop()
 
-    selected_symbol = st.selectbox(
-        "Focus stock",
-        radar["symbol"].tolist(),
-        index=0,
-        key="dashboard_focus_stock",
+    # -------------------------------------------------------------------------
+    # Interactive radar
+    # -------------------------------------------------------------------------
+    # The old version used a selectbox below the radar.  The dashboard now
+    # behaves more like a trading terminal: click any row in the radar and the
+    # selected stock drives every intelligence panel below.
+    preferred = [
+        "symbol", "signal", "score", "status", "price",
+        "rvol", "rsi", "atr", "mtf_score", "oi_status", "priority"
+    ]
+    radar_cols = [c for c in preferred if c in radar.columns]
+    radar_display = radar[radar_cols].copy()
+
+    rename = {
+        "symbol": "SYMBOL",
+        "signal": "SIGNAL",
+        "score": "SCORE",
+        "status": "MODEL STATUS",
+        "price": "PRICE",
+        "rvol": "RVOL",
+        "rsi": "RSI",
+        "atr": "ATR",
+        "mtf_score": "60M",
+        "oi_status": "FUT OI",
+        "priority": "PRIORITY",
+    }
+    radar_display = radar_display.rename(columns=rename)
+
+    if "PRICE" in radar_display.columns:
+        radar_display["PRICE"] = pd.to_numeric(
+            radar_display["PRICE"], errors="coerce"
+        ).map(lambda x: f"₹{x:,.2f}" if pd.notna(x) else "—")
+
+    if "RVOL" in radar_display.columns:
+        radar_display["RVOL"] = pd.to_numeric(
+            radar_display["RVOL"], errors="coerce"
+        ).map(lambda x: f"{x:.2f}x" if pd.notna(x) else "—")
+
+    if "RSI" in radar_display.columns:
+        radar_display["RSI"] = pd.to_numeric(
+            radar_display["RSI"], errors="coerce"
+        ).map(lambda x: f"{x:.1f}" if pd.notna(x) else "—")
+
+    if "ATR" in radar_display.columns:
+        radar_display["ATR"] = pd.to_numeric(
+            radar_display["ATR"], errors="coerce"
+        ).map(lambda x: f"{x:.2f}" if pd.notna(x) else "—")
+
+    if "60M" in radar_display.columns:
+        radar_display["60M"] = pd.to_numeric(
+            radar_display["60M"], errors="coerce"
+        ).map(lambda x: f"{x:.0f}" if pd.notna(x) else "—")
+
+    st.caption(
+        "Click any stock row below. The selected stock automatically drives "
+        "Technical Confirmation, Trade Plan, MTF, Futures OI and Option Intelligence."
     )
-    selected = radar[radar["symbol"] == selected_symbol].iloc[0]
+
+    radar_event = st.dataframe(
+        radar_display,
+        use_container_width=True,
+        hide_index=True,
+        on_select="rerun",
+        selection_mode="single-row",
+        key="trade_radar",
+    )
+
+    # Persist the selection across Streamlit reruns/auto-refreshes.
+    selected_rows = radar_event.selection.rows
+
+    if selected_rows:
+        clicked_index = selected_rows[0]
+        clicked_symbol = str(
+            radar_display.iloc[clicked_index]["SYMBOL"]
+        )
+        st.session_state["dashboard_selected_symbol"] = clicked_symbol
+
+    selected_symbol = st.session_state.get("dashboard_selected_symbol")
+
+    # If the previously selected stock has disappeared from the current radar
+    # after a refresh, automatically fall back to the first available candidate.
+    radar_symbols = radar["symbol"].astype(str).tolist()
+
+    if selected_symbol not in radar_symbols:
+        selected_symbol = radar_symbols[0]
+        st.session_state["dashboard_selected_symbol"] = selected_symbol
+
+    # Small confirmation line so it is obvious which row is driving the panels.
+    st.markdown(
+        f'<div class="tiny">Selected stock: <b>{selected_symbol}</b> '
+        f'· Click another radar row to switch</div>',
+        unsafe_allow_html=True,
+    )
+
+    selected = radar[radar["symbol"].astype(str) == selected_symbol].iloc[0]
     universe_row = universe[universe["symbol"] == selected_symbol].iloc[0]
     sid = int(universe_row["security_id"])
 
